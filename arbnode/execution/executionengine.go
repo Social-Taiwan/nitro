@@ -3,16 +3,20 @@ package execution
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/gorilla/websocket"
 	"github.com/offchainlabs/nitro/arbos"
 	"github.com/offchainlabs/nitro/arbos/arbosState"
 	"github.com/offchainlabs/nitro/arbos/arbostypes"
@@ -47,6 +51,14 @@ type ExecutionEngine struct {
 	nextScheduledVersionCheck time.Time // protected by the createBlocksMutex
 
 	reorgSequencing bool
+
+	// hack
+	headerchs      map[int]chan []*types.Log
+	receiptschs    map[int]chan types.Receipts
+	receiptsShmChs chan types.Receipts
+	globalCountH   int
+	globalCountR   int
+	mutex          *sync.RWMutex
 }
 
 func NewExecutionEngine(bc *core.BlockChain) (*ExecutionEngine, error) {
@@ -54,6 +66,12 @@ func NewExecutionEngine(bc *core.BlockChain) (*ExecutionEngine, error) {
 		bc:               bc,
 		resequenceChan:   make(chan []*arbostypes.MessageWithMetadata),
 		newBlockNotifier: make(chan struct{}, 1),
+		headerchs:        make(map[int]chan []*types.Log, 100),
+		receiptschs:      make(map[int]chan types.Receipts, 100),
+		receiptsShmChs:   make(chan types.Receipts, 100),
+		globalCountH:     0,
+		globalCountR:     0,
+		mutex:            &sync.RWMutex{},
 	}, nil
 }
 
@@ -499,6 +517,31 @@ func (s *ExecutionEngine) DigestMessage(num arbutil.MessageIndex, msg *arbostype
 	return s.digestMessageWithBlockMutex(num, msg)
 }
 
+func (s *ExecutionEngine) sendReceiptsToListener(receipts types.Receipts) {
+	var logs []*types.Log
+	for _, receipt := range receipts {
+		logs = append(logs, receipt.Logs...)
+	}
+	if receipts.Len() > 0 {
+		go func() {
+			for key, _ := range s.receiptschs {
+				s.mutex.Lock()
+				s.receiptschs[key] <- receipts
+				s.mutex.Unlock()
+			}
+		}()
+	}
+	if len(logs) > 0 {
+		go func() {
+			for key, _ := range s.headerchs {
+				s.mutex.Lock()
+				s.headerchs[key] <- logs
+				s.mutex.Unlock()
+			}
+		}()
+	}
+}
+
 func (s *ExecutionEngine) digestMessageWithBlockMutex(num arbutil.MessageIndex, msg *arbostypes.MessageWithMetadata) error {
 	currentHeader, err := s.getCurrentHeader()
 	if err != nil {
@@ -517,7 +560,7 @@ func (s *ExecutionEngine) digestMessageWithBlockMutex(num arbutil.MessageIndex, 
 	if err != nil {
 		return err
 	}
-
+	go s.sendReceiptsToListener(receipts)
 	err = s.appendBlock(block, statedb, receipts, time.Since(startTime))
 	if err != nil {
 		return err
@@ -574,8 +617,123 @@ func (s *ExecutionEngine) digestMessageWithBlockMutex(num arbutil.MessageIndex, 
 	return nil
 }
 
+var upgrader = websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096}
+
+type NewHeader struct {
+	Logs []types.Log `json:"logs"`
+}
+
+type NewReceipt struct {
+	TxHash          common.Hash    `json:"txHash"`
+	ContractAddress common.Address `json:"contractAddress"`
+	GasUsed         uint64         `json:"gasUsed"`
+	Status          uint64         `json:"status"`
+	Logs            []types.Log    `json:"logs"`
+}
+
+type NewReceipts struct {
+	Receipts []NewReceipt `json:"receipts"`
+}
+
+func (s *ExecutionEngine) newReceipts(w http.ResponseWriter, r *http.Request) {
+	log.Info("create handler for new receipts")
+	index := s.globalCountR
+	s.receiptschs[index] = make(chan types.Receipts, 100)
+	s.globalCountR += 1
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Info("fail to setup ws hanlder")
+		return
+	}
+	defer c.Close()
+	defer delete(s.receiptschs, index)
+	for {
+		select {
+		case receipts := <-s.receiptschs[index]:
+			newReceipts := NewReceipts{}
+			for _, receipt := range receipts {
+				var logs []types.Log
+				for _, log := range receipt.Logs {
+					logs = append(logs, types.Log{
+						Address:     log.Address,
+						Topics:      log.Topics,
+						Data:        log.Data,
+						BlockNumber: log.BlockNumber,
+						TxHash:      log.TxHash,
+						TxIndex:     log.TxIndex,
+						BlockHash:   log.BlockHash,
+						Index:       log.Index,
+						Removed:     log.Removed,
+					})
+				}
+				newReceipts.Receipts = append(newReceipts.Receipts, NewReceipt{
+					TxHash:          receipt.TxHash,
+					ContractAddress: receipt.ContractAddress,
+					GasUsed:         receipt.GasUsed,
+					Status:          receipt.Status,
+					Logs:            logs,
+				})
+			}
+			err = c.WriteJSON(newReceipts)
+			if err != nil {
+				log.Info("fail to write json")
+				return
+			}
+		}
+	}
+
+}
+
+func (s *ExecutionEngine) newHeader(w http.ResponseWriter, r *http.Request) {
+	log.Info("create handler for new headers")
+	index := s.globalCountH
+	s.headerchs[index] = make(chan []*types.Log, 100)
+	s.globalCountH += 1
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Info("fail to setup ws hanlder")
+		return
+	}
+	defer c.Close()
+	defer delete(s.headerchs, index)
+	for {
+		select {
+		case logs := <-s.headerchs[index]:
+			newHead := NewHeader{}
+			for ind := 0; ind < len(logs); ind++ {
+				log := logs[ind]
+				newHead.Logs = append(newHead.Logs, types.Log{
+					Address:     log.Address,
+					Topics:      log.Topics,
+					Data:        log.Data,
+					BlockNumber: log.BlockNumber,
+					TxHash:      log.TxHash,
+					TxIndex:     log.TxIndex,
+					BlockHash:   log.BlockHash,
+					Index:       log.Index,
+					Removed:     log.Removed,
+				})
+			}
+			payload := newHead
+			payloadJson, _ := json.Marshal(payload)
+			serr := c.WriteMessage(websocket.TextMessage, payloadJson)
+			if serr != nil {
+				log.Info(serr.Error())
+				return
+			}
+
+		}
+	}
+	return
+}
+
 func (s *ExecutionEngine) Start(ctx_in context.Context) {
 	s.StopWaiter.Start(ctx_in, s)
+	log.Info("start up ws Server.")
+	http.HandleFunc("/header", s.newHeader)
+	http.HandleFunc("/receipts", s.newReceipts)
+	go http.ListenAndServe(":8086", nil)
+	log.Info("ws Server started.")
 	s.LaunchThread(func(ctx context.Context) {
 		for {
 			select {
