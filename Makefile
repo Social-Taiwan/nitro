@@ -14,7 +14,6 @@ else
  ORDER_ONLY_PREDICATE:=
 endif
 
-
 ifneq ($(origin NITRO_VERSION),undefined)
  GOLANG_LDFLAGS += -X github.com/offchainlabs/nitro/cmd/util/confighelpers.version=$(NITRO_VERSION)
 endif

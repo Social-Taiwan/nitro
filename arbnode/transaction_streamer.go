@@ -834,6 +834,10 @@ func (s *TransactionStreamer) ExpectChosenSequencer() error {
 	return nil
 }
 
+func (s *TransactionStreamer) ParseL2Message(msg arbostypes.MessageWithMetadata) {
+
+}
+
 func (s *TransactionStreamer) WriteMessageFromSequencer(pos arbutil.MessageIndex, msgWithMeta arbostypes.MessageWithMetadata) error {
 	if err := s.ExpectChosenSequencer(); err != nil {
 		return err
