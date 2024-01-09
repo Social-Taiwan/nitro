@@ -17,6 +17,8 @@ import (
 	"github.com/offchainlabs/nitro/solgen/go/precompilesgen"
 	"github.com/offchainlabs/nitro/util/arbmath"
 
+	r_log "log"
+
 	"github.com/ethereum/go-ethereum/arbitrum_types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -148,6 +150,7 @@ func ProduceBlock(
 	chainContext core.ChainContext,
 	chainConfig *params.ChainConfig,
 	batchFetcher arbostypes.FallibleBatchFetcher,
+	singleReceipts chan types.Receipt,
 ) (*types.Block, types.Receipts, error) {
 	var batchFetchErr error
 	txes, err := ParseL2Transactions(message, chainConfig.ChainID, func(batchNum uint64, batchHash common.Hash) []byte {
@@ -163,6 +166,9 @@ func ProduceBlock(
 		}
 		return data
 	})
+	for _, tx := range txes {
+		r_log.Println("[ProduceBlock] 🛰️🛰️ hash:", tx.Hash().Hex())
+	}
 	if batchFetchErr != nil {
 		return nil, nil, batchFetchErr
 	}
@@ -341,6 +347,9 @@ func ProduceBlockAdvanced(
 					return hooks.PostTxFilter(header, state, tx, sender, dataGas, result)
 				},
 			)
+
+			r_log.Println("[ProduceBlockAdvanced] 🛰️🛰️ hash:", receipt.TxHash.Hex(), "BlockNumber:", receipt.BlockNumber)
+
 			if err != nil {
 				// Ignore this transaction if it's invalid under the state transition function
 				statedb.RevertToSnapshot(snap)
