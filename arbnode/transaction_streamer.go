@@ -385,6 +385,7 @@ func (s *TransactionStreamer) AddBroadcastMessages(feedMessages []*broadcaster.B
 	if err != nil {
 		return err
 	}
+
 	messages = messages[dups:]
 	broadcastStartPos += arbutil.MessageIndex(dups)
 	if oldMsg != nil {

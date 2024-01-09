@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"testing"
 	"time"
+
+	r_log "log"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -55,6 +58,7 @@ type ExecutionEngine struct {
 	// hack
 	headerchs      map[int]chan []*types.Log
 	receiptschs    map[int]chan types.Receipts
+	singleReceipt  chan types.Receipt
 	receiptsShmChs chan types.Receipts
 	globalCountH   int
 	globalCountR   int
@@ -62,12 +66,24 @@ type ExecutionEngine struct {
 }
 
 func NewExecutionEngine(bc *core.BlockChain) (*ExecutionEngine, error) {
+	currentTime := time.Now()
+	filename := fmt.Sprintf("/root/.arbitrum/log_data_provider_%s.txt", currentTime.Format("2006-01-02"))
+
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		r_log.Fatalf("failed opening file: %s", err)
+	}
+
+	r_log.SetOutput(file)
+	r_log.SetFlags(r_log.Ldate | r_log.Ltime | r_log.Lmicroseconds)
+
 	return &ExecutionEngine{
 		bc:               bc,
 		resequenceChan:   make(chan []*arbostypes.MessageWithMetadata),
 		newBlockNotifier: make(chan struct{}, 1),
 		headerchs:        make(map[int]chan []*types.Log, 100),
 		receiptschs:      make(map[int]chan types.Receipts, 100),
+		singleReceipts:   make(chan types.Receipts, 100),
 		receiptsShmChs:   make(chan types.Receipts, 100),
 		globalCountH:     0,
 		globalCountR:     0,
@@ -259,6 +275,9 @@ func (s *ExecutionEngine) resequenceReorgedMessages(messages []*arbostypes.Messa
 		if err != nil {
 			log.Warn("failed to parse sequencer message found from reorg", "err", err)
 			continue
+		}
+		for _, tx := range txes {
+			r_log.Println("[resequenceReorgedMessages] 🛰️🛰️ hash:", tx.Hash().Hex())
 		}
 		hooks := arbos.NoopSequencingHooks()
 		hooks.DiscardInvalidTxsEarly = true
@@ -488,6 +507,7 @@ func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWith
 		s.bc,
 		s.bc.Config(),
 		s.streamer.FetchBatch,
+		s.singleReceipt,
 	)
 
 	return block, statedb, receipts, err

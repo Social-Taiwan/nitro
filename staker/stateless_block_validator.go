@@ -406,6 +406,7 @@ func (v *StatelessBlockValidator) RecordBlockCreation(
 			chaincontext,
 			chainConfig,
 			batchFetcher,
+			nil,
 		)
 		if err != nil {
 			return common.Hash{}, nil, nil, err
