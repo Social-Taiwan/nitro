@@ -14,6 +14,7 @@ import (
 	"github.com/offchainlabs/nitro/arbos/arbostypes"
 	"github.com/offchainlabs/nitro/arbos/l2pricing"
 	"github.com/offchainlabs/nitro/arbos/util"
+	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/offchainlabs/nitro/solgen/go/precompilesgen"
 	"github.com/offchainlabs/nitro/util/arbmath"
 
@@ -150,7 +151,7 @@ func ProduceBlock(
 	chainContext core.ChainContext,
 	chainConfig *params.ChainConfig,
 	batchFetcher arbostypes.FallibleBatchFetcher,
-	singleReceipts chan types.Receipt,
+	ws *arbutil.WebsocketServer,
 ) (*types.Block, types.Receipts, error) {
 	var batchFetchErr error
 	txes, err := ParseL2Transactions(message, chainConfig.ChainID, func(batchNum uint64, batchHash common.Hash) []byte {
@@ -179,7 +180,7 @@ func ProduceBlock(
 
 	hooks := NoopSequencingHooks()
 	return ProduceBlockAdvanced(
-		message.Header, txes, delayedMessagesRead, lastBlockHeader, statedb, chainContext, chainConfig, hooks,
+		message.Header, txes, delayedMessagesRead, lastBlockHeader, statedb, chainContext, chainConfig, hooks, ws,
 	)
 }
 
@@ -193,6 +194,7 @@ func ProduceBlockAdvanced(
 	chainContext core.ChainContext,
 	chainConfig *params.ChainConfig,
 	sequencingHooks *SequencingHooks,
+	ws *arbutil.WebsocketServer,
 ) (*types.Block, types.Receipts, error) {
 
 	state, err := arbosState.OpenSystemArbosState(statedb, nil, true)
@@ -347,9 +349,6 @@ func ProduceBlockAdvanced(
 					return hooks.PostTxFilter(header, state, tx, sender, dataGas, result)
 				},
 			)
-
-			r_log.Println("[ProduceBlockAdvanced] 🛰️🛰️ hash:", receipt.TxHash.Hex(), "BlockNumber:", receipt.BlockNumber)
-
 			if err != nil {
 				// Ignore this transaction if it's invalid under the state transition function
 				statedb.RevertToSnapshot(snap)
@@ -361,6 +360,9 @@ func ProduceBlockAdvanced(
 				statedb.RevertToSnapshot(snap)
 				return nil, nil, err
 			}
+			r_log.Println("[ProduceBlockAdvanced] 🛰️🛰️ hash:", receipt.TxHash.Hex(), "BlockNumber:", receipt.BlockNumber)
+
+			go sendTxResult(receipt, ws)
 
 			return receipt, result, nil
 		})()
@@ -554,4 +556,35 @@ func FinalizeBlock(header *types.Header, txs types.Transactions, statedb *state.
 		arbitrumHeader.UpdateHeaderWithInfo(header)
 		header.Root = statedb.IntermediateRoot(true)
 	}
+}
+
+func sendTxResult(receipt *types.Receipt, ws *arbutil.WebsocketServer) {
+	if receipt == nil || ws == nil || receipt.Status != types.ReceiptStatusSuccessful {
+		return
+	}
+	var logs []types.Log
+	var newReceipt arbutil.NewReceipts
+	for _, log := range receipt.Logs {
+		logs = append(logs, types.Log{
+			Address:     log.Address,
+			Topics:      log.Topics,
+			Data:        log.Data,
+			BlockNumber: log.BlockNumber,
+			TxHash:      log.TxHash,
+			TxIndex:     log.TxIndex,
+			BlockHash:   log.BlockHash,
+			Index:       log.Index,
+			Removed:     log.Removed,
+		})
+	}
+	newReceipt.Receipts = append(newReceipt.Receipts, arbutil.NewReceipt{
+		TxHash:          receipt.TxHash,
+		ContractAddress: receipt.ContractAddress,
+		GasUsed:         receipt.GasUsed,
+		Status:          receipt.Status,
+		Logs:            logs,
+	})
+
+	ws.PathToConnMangers[arbutil.TXRESULT_PATH].DataChan <- newReceipt
+
 }
