@@ -14,7 +14,7 @@ import (
 
 const (
 	NEWHEADER_PATH = "/newheader"
-	RECEIPT_PATH   = "/receipt"
+	RECEIPT_PATH   = "/receipts"
 	TXRESULT_PATH  = "/txresult"
 )
 
