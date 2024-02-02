@@ -144,6 +144,7 @@ func (r *BlockRecorder) RecordBlockCreation(
 			chaincontext,
 			chainConfig,
 			batchFetcher,
+			nil,
 		)
 		if err != nil {
 			return nil, err

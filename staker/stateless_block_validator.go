@@ -11,7 +11,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/offchainlabs/nitro/arbos"
 	"github.com/offchainlabs/nitro/execution"
 	"github.com/offchainlabs/nitro/util/rpcclient"
 	"github.com/offchainlabs/nitro/validator/server_api"
@@ -20,11 +19,9 @@ import (
 	"github.com/offchainlabs/nitro/validator"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
-	"github.com/offchainlabs/nitro/arbos/arbosState"
 	"github.com/offchainlabs/nitro/arbos/arbostypes"
 	"github.com/offchainlabs/nitro/arbstate"
 )
@@ -253,107 +250,7 @@ func (v *StatelessBlockValidator) GetModuleRootsToValidate() []common.Hash {
 	return validatingModuleRoots
 }
 
-func stateLogFunc(targetHeader, header *types.Header, hasState bool) {
-	if targetHeader == nil || header == nil {
-		return
-	}
-	gap := targetHeader.Number.Int64() - header.Number.Int64()
-	step := int64(500)
-	stage := "computing state"
-	if !hasState {
-		step = 3000
-		stage = "looking for full block"
-	}
-	if (gap >= step) && (gap%step == 0) {
-		log.Info("Setting up validation", "stage", stage, "current", header.Number, "target", targetHeader.Number)
-	}
-}
-
-// If msg is nil, this will record block creation up to the point where message would be accessed (for a "too far" proof)
-// If keepreference == true, reference to state of prevHeader is added (no reference added if an error is returned)
-func (v *StatelessBlockValidator) RecordBlockCreation(
-	ctx context.Context,
-	prevHeader *types.Header,
-	msg *arbostypes.MessageWithMetadata,
-	keepReference bool,
-) (common.Hash, map[common.Hash][]byte, []validator.BatchInfo, error) {
-
-	recordingdb, chaincontext, recordingKV, err := v.recordingDatabase.PrepareRecording(ctx, prevHeader, stateLogFunc)
-	if err != nil {
-		return common.Hash{}, nil, nil, err
-	}
-	defer func() { v.recordingDatabase.Dereference(prevHeader) }()
-
-	chainConfig := v.blockchain.Config()
-
-	// Get the chain ID, both to validate and because the replay binary also gets the chain ID,
-	// so we need to populate the recordingdb with preimages for retrieving the chain ID.
-	if prevHeader != nil {
-		initialArbosState, err := arbosState.OpenSystemArbosState(recordingdb, nil, true)
-		if err != nil {
-			return common.Hash{}, nil, nil, fmt.Errorf("error opening initial ArbOS state: %w", err)
-		}
-		chainId, err := initialArbosState.ChainId()
-		if err != nil {
-			return common.Hash{}, nil, nil, fmt.Errorf("error getting chain ID from initial ArbOS state: %w", err)
-		}
-		if chainId.Cmp(chainConfig.ChainID) != 0 {
-			return common.Hash{}, nil, nil, fmt.Errorf("unexpected chain ID %v in ArbOS state, expected %v", chainId, chainConfig.ChainID)
-		}
-		genesisNum, err := initialArbosState.GenesisBlockNum()
-		if err != nil {
-			return common.Hash{}, nil, nil, fmt.Errorf("error getting genesis block number from initial ArbOS state: %w", err)
-		}
-		expectedNum := chainConfig.ArbitrumChainParams.GenesisBlockNum
-		if genesisNum != expectedNum {
-			return common.Hash{}, nil, nil, fmt.Errorf("unexpected genesis block number %v in ArbOS state, expected %v", genesisNum, expectedNum)
-		}
-	}
-
-	var blockHash common.Hash
-	var readBatchInfo []validator.BatchInfo
-	if msg != nil {
-		batchFetcher := func(batchNum uint64) ([]byte, error) {
-			data, err := v.inboxReader.GetSequencerMessageBytes(ctx, batchNum)
-			if err != nil {
-				return nil, err
-			}
-			readBatchInfo = append(readBatchInfo, validator.BatchInfo{
-				Number: batchNum,
-				Data:   data,
-			})
-			return data, nil
-		}
-		// Re-fetch the batch instead of using our cached cost,
-		// as the replay binary won't have the cache populated.
-		msg.Message.BatchGasCost = nil
-		block, _, err := arbos.ProduceBlock(
-			msg.Message,
-			msg.DelayedMessagesRead,
-			prevHeader,
-			recordingdb,
-			chaincontext,
-			chainConfig,
-			batchFetcher,
-			nil,
-		)
-		if err != nil {
-			return common.Hash{}, nil, nil, err
-		}
-		blockHash = block.Hash()
-	}
-
-	preimages, err := v.recordingDatabase.PreimagesFromRecording(chaincontext, recordingKV)
-	if err != nil {
-		return common.Hash{}, nil, nil, err
-	}
-	if keepReference {
-		prevHeader = nil
-	}
-	return blockHash, preimages, readBatchInfo, err
-}
-
-func (v *StatelessBlockValidator) ValidationEntryRecord(ctx context.Context, e *validationEntry, keepReference bool) error {
+func (v *StatelessBlockValidator) ValidationEntryRecord(ctx context.Context, e *validationEntry) error {
 	if e.Stage != ReadyForRecord {
 		return fmt.Errorf("validation entry should be ReadyForRecord, is: %v", e.Stage)
 	}
