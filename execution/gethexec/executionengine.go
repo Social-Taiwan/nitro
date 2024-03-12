@@ -480,7 +480,6 @@ func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWith
 	}
 	statedb.StartPrefetcher("TransactionStreamer")
 	defer statedb.StopPrefetcher()
-
 	block, receipts, err := arbos.ProduceBlock(
 		msg.Message,
 		msg.DelayedMessagesRead,
@@ -488,12 +487,11 @@ func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWith
 		statedb,
 		s.bc,
 		s.bc.Config(),
-		s.streamer.FetchBatch,
-		s.ws,
 		func(batchNum uint64) ([]byte, error) {
 			data, _, err := s.streamer.FetchBatch(batchNum)
 			return data, err
 		},
+		s.ws,
 	)
 
 	return block, statedb, receipts, err
